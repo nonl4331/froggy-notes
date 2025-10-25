@@ -2,8 +2,9 @@ use std::time::Instant;
 
 use image::GenericImageView;
 use winit::{
-    event::{Event, WindowEvent},
+    event::{DeviceEvent, ElementState, Event, WindowEvent},
     event_loop::EventLoop,
+    keyboard::{Key, NamedKey},
     window::WindowBuilder,
 };
 
@@ -38,6 +39,16 @@ fn main() {
         .run(|event, elwt| {
             match event {
                 Event::WindowEvent {
+                    event: WindowEvent::KeyboardInput { event, .. },
+                    ..
+                } if event.state == ElementState::Pressed => match event.logical_key {
+                    Key::Character(c) => todo!(),
+                    Key::Named(NamedKey::Backspace) => todo!(),
+                    Key::Named(NamedKey::ArrowRight) => todo!(),
+                    Key::Named(NamedKey::ArrowLeft) => todo!(),
+                    _ => {}
+                },
+                Event::WindowEvent {
                     event: WindowEvent::CloseRequested,
                     ..
                 } => {
@@ -64,10 +75,111 @@ fn main() {
 
 const FROG_PIXEL_WIDTH: i16 = 5;
 
+#[derive(Debug)]
+struct Statement {
+    text: String,
+    bounding_box: BoundingBox,
+    col: [u8; 4],
+}
+
+const TEXT_PIXEL_SIZE: usize = 1;
+const TEXT_PIXEL_OFFSET_X: usize = 40;
+const TEXT_PIXEL_OFFSET_RIGHT: usize = 5;
+const TEXT_PIXEL_OFFSET_BOTTOM: usize = 5;
+const TEXT_PIXEL_OFFSET_Y: usize = 40;
+
+const TEXT_PIXELS_WIDE: usize = (WIDTH as usize - TEXT_PIXEL_OFFSET_X - TEXT_PIXEL_OFFSET_RIGHT) / TEXT_PIXEL_SIZE;
+const TEXT_PIXELS_HIGH: usize = (HEIGHT as usize - TEXT_PIXEL_OFFSET_Y - TEXT_PIXEL_OFFSET_BOTTOM) / TEXT_PIXEL_SIZE;
+const LINE_SPACING: i32 = 15;
+
+const DEMO_TEXT: &str = "Write something here..............AAAAAAAAAAAAAAAAAAAAAA";
+const CURSOR_TEXT: &str = "Write something here...";
+impl Statement {
+    pub fn new() -> Self {
+        Self {
+            text: String::new(),
+            bounding_box: BoundingBox {
+                size: Coord::new(0, 0),
+                offset: Coord::new(0, 0),
+            },
+            col: [255; 4],
+        }
+    }
+    pub fn render_into(
+        &mut self,
+        font_buffer: &mut [[u8; 4]],
+        cursor: &mut Coord,
+        text_cursor: Option<usize>,
+        font: &BdfFont,
+    ) {
+        if self.text.is_empty() {
+            let mut render_text = &self.text[..];
+            if text_cursor.is_none() {
+                self.col = [127, 127, 127, 255];
+                render_text = DEMO_TEXT;
+            }
+
+            let mut chars = render_text.chars();
+            let mut nc = chars.next();
+            let mut statement = BoundingBox {
+                size: Coord::new(0, 0),
+                offset: *cursor,
+            };
+            let mut lc = *cursor;
+            while let Some(c) = nc {
+                let g = font.glyphs.get(c).unwrap();
+                let bb = g.bounding_box;
+                if lc.x + bb.offset.x + bb.size.x >= TEXT_PIXELS_WIDE as i32 {
+                    // WRAP TO NEWLINE
+                    lc.x = 0;
+                    lc.y += 10;
+                    continue;
+                }
+                for i in 0..(bb.size.x * bb.size.y) as usize {
+                    let x = i % bb.size.x as usize;
+                    let y = i / bb.size.x as usize;
+                    if g.pixel(x, y) {
+                        let x = x as i32 + lc.x + bb.offset.x;
+                        let y = y as i32 + lc.y + bb.offset.y;
+                        if x >= 0
+                            && y >= 0
+                            && (x as usize) < TEXT_PIXELS_WIDE
+                            && (y as usize) < TEXT_PIXELS_HIGH
+                        {
+                            font_buffer[x as usize + y as usize * TEXT_PIXELS_WIDE] = self.col;
+                        }
+                    }
+                }
+
+                lc.x += g.device_width.x;
+
+                statement.size.x = statement.size.x.max(lc.x - cursor.x);
+                statement.size.y = statement.size.y.max(lc.y - cursor.y);
+
+                if let Some(new_c) = chars.next() {
+                    nc = Some(new_c);
+                } else {
+                    // if last char move cursor down a line
+                    lc.x = 0;
+                    lc.y += 10;
+                    nc = None;
+                }
+            }
+            cursor.y = lc.y + LINE_SPACING;
+        }
+    }
+    pub fn is_empty(&self) -> bool {
+        self.text.is_empty()
+    }
+}
+
 struct Note {
     start: Instant,
     frog: Frog,
     font: BdfFont,
+    statements: Vec<Statement>,
+    // statement index, character index
+    text_cursor: Option<(usize, usize)>,
 }
 
 impl Note {
@@ -78,6 +190,8 @@ impl Note {
             frog: Frog::new(),
             start: Instant::now(),
             font,
+            statements: vec![Statement::new(), Statement::new()],
+            text_cursor: None,
         }
     }
 
@@ -85,7 +199,7 @@ impl Note {
         let t = self.start.elapsed().as_secs_f32();
         self.frog.position = [0.5 + 0.4 * t.sin(), 0.5 + 0.4 * t.cos()];
     }
-    fn draw(&self, frame: &mut [u8]) {
+    fn draw(&mut self, frame: &mut [u8]) {
         // background
         for pixel in frame.chunks_exact_mut(4) {
             pixel.copy_from_slice(&[50, 205, 50, 255]);
@@ -100,13 +214,10 @@ impl Note {
                 pixel.copy_from_slice(&col);
             }
         }
-        const TEXT_PIXELS_WIDE: usize = 400;
-        const TEXT_PIXELS_HIGH: usize = 100;
         let mut font_buffer = vec![[0u8; 4]; TEXT_PIXELS_HIGH * TEXT_PIXELS_WIDE];
 
         // text layer
-        let test_text = "Hello World!";
-        let mut cursor = (0, 1);
+        /*let test_text = "Hello World!";
         for c in test_text.chars() {
             let g = self.font.glyphs.get(c).unwrap();
             let bb = g.bounding_box;
@@ -127,11 +238,12 @@ impl Note {
             }
 
             cursor.0 += g.device_width.x;
+        }*/
+        let mut cursor = Coord::new(0, 1);
+        for statement in &mut self.statements {
+            statement.render_into(&mut font_buffer, &mut cursor, None, &self.font);
         }
 
-        const TEXT_PIXEL_SIZE: usize = 2;
-        const TEXT_PIXEL_OFFSET_X: usize = 40;
-        const TEXT_PIXEL_OFFSET_Y: usize = 40;
         let xy_to_tx_pixel = |x: usize, y: usize| {
             if x < TEXT_PIXEL_OFFSET_X || y < TEXT_PIXEL_OFFSET_Y {
                 return None;
@@ -176,7 +288,6 @@ impl Frog {
         }
     }
     pub fn query_uv(&self, u: f32, v: f32) -> Option<[u8; 4]> {
-
         // move to position
         let mut u = u - self.position[0];
         let mut v = v - self.position[1];
@@ -230,6 +341,10 @@ impl Bitmap {
             .chunks_exact(4)
             .map(|c| <[u8; 4]>::try_from(c).unwrap())
             .collect();
-        Self { x: x as usize, y: y as usize, data }
+        Self {
+            x: x as usize,
+            y: y as usize,
+            data,
+        }
     }
 }
