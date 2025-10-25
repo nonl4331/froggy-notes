@@ -1,4 +1,3 @@
-use glyph_brush_layout::{FontId, GlyphPositioner, Layout, SectionGeometry, SectionText};
 use image::GenericImageView;
 use winit::{
     event::{Event, WindowEvent},
@@ -6,7 +5,7 @@ use winit::{
     window::WindowBuilder,
 };
 
-use ab_glyph::{Font, FontArc, FontRef, Glyph, PxScale, PxScaleFont, point};
+use bdf_parser::*;
 
 use pixels::{Pixels, SurfaceTexture};
 
@@ -70,12 +69,12 @@ struct World {
     velocity_x: i16,
     velocity_y: i16,
     frog: Bitmap,
-    font: FontArc,
+    font: BdfFont,
 }
 
 impl World {
     fn new() -> Self {
-        let font = ab_glyph::FontArc::try_from_slice(include_bytes!("../res/font3.ttf")).unwrap();
+        let font = bdf_parser::BdfFont::parse(include_bytes!("../res/Tamzen7x14r.bdf")).unwrap();
 
         Self {
             box_x: 24,
@@ -99,24 +98,12 @@ impl World {
         self.box_y += self.velocity_y;
     }
     fn draw(&self, frame: &mut [u8]) {
-        // box layer
-        for (i, pixel) in frame.chunks_exact_mut(4).enumerate() {
-            let x = (i % WIDTH as usize) as i16;
-            let y = (i / WIDTH as usize) as i16;
+        // background
+        for pixel in frame.chunks_exact_mut(4) {
 
-            let inside_the_box = x >= self.box_x
-                && x < self.box_x + BOX_SIZE
-                && y >= self.box_y
-                && y < self.box_y + BOX_SIZE;
-
-            let rgba = if inside_the_box {
-                [0x5e, 0x48, 0xe8, 0xff]
-            } else {
-                [50, 205, 50, 255]
-            };
-
-            pixel.copy_from_slice(&rgba);
+            pixel.copy_from_slice(&[50, 205, 50, 255]);
         }
+
         for (i, pixel) in frame.chunks_exact_mut(4).enumerate() {
             let x = (i % WIDTH as usize) as i16 / FROG_PIXEL_WIDTH;
             let y = (i / WIDTH as usize) as i16 / FROG_PIXEL_WIDTH;
@@ -139,39 +126,31 @@ impl World {
         let mut font_buffer = vec![[0u8; 4]; TEXT_PIXELS_HIGH * TEXT_PIXELS_WIDE];
 
         // text layer
-        let test_text = "abfdnajkl;1$@!$789 124";
-        let glyphs = Layout::default().calculate_glyphs(&[&self.font], &SectionGeometry {
-            screen_position: (0.0, 0.0),
-            ..SectionGeometry::default()
-            },
-            &[
-                SectionText {
-                    text: test_text,
-                    scale: self.font.pt_to_px_scale(24.0).unwrap(),
-                    font_id: FontId(0),
-                },
-            ]
-
-        );
-
-        for glyph in glyphs {
-            if let Some(outline) = self.font.outline_glyph(glyph.glyph) {
-                let bb = outline.px_bounds();
-                let posx = bb.min.x as u32;
-                let posy = bb.min.y as u32;
-                outline.draw(|x, y, v| {
-                    if v > 0.0 {
-                        let x = posx + x;
-                        let y = posy + y;
-                        if (x as usize) < TEXT_PIXELS_WIDE && (y as usize) < TEXT_PIXELS_HIGH {
-                            font_buffer[x as usize + y as usize * TEXT_PIXELS_WIDE] = [(255.0) as u8; 4];
-                        }
+        let test_text = "Hello World!";
+        let mut cursor = (0, 1);
+        for c in test_text.chars() {
+            let g = self.font.glyphs.get(c).unwrap();
+            let bb = g.bounding_box;
+            for i in 0..(bb.size.x * bb.size.y) as usize {
+                let x = i % bb.size.x as usize;
+                let y = i / bb.size.x as usize;
+                if g.pixel(x, y) {
+                    let x = x as i32 + cursor.0 + bb.offset.x;
+                    let y = y as i32 + cursor.1 + bb.offset.y;
+                    if x >= 0
+                        && y >= 0
+                        && (x as usize) < TEXT_PIXELS_WIDE
+                        && (y as usize) < TEXT_PIXELS_HIGH
+                    {
+                        font_buffer[x as usize + y as usize * TEXT_PIXELS_WIDE] = [255; 4];
                     }
-                });
+                }
             }
+
+            cursor.0 += g.device_width.x;
         }
 
-        const TEXT_PIXEL_SIZE: usize = 1;
+        const TEXT_PIXEL_SIZE: usize = 2;
         const TEXT_PIXEL_OFFSET_X: usize = 40;
         const TEXT_PIXEL_OFFSET_Y: usize = 40;
         let xy_to_tx_pixel = |x: usize, y: usize| {
