@@ -1,3 +1,4 @@
+use image::GenericImageView;
 use winit::{
     event::{Event, WindowEvent},
     event_loop::EventLoop,
@@ -29,39 +30,43 @@ fn main() {
         Pixels::new(WIDTH, HEIGHT, surface_texture).unwrap()
     };
 
-    event_loop.run(|event, elwt| {
-        match event {
-            Event::WindowEvent {
-                event: WindowEvent::CloseRequested,
-                ..
-            } => {
-                println!("The close button was pressed; stopping");
-                elwt.exit();
+    event_loop
+        .run(|event, elwt| {
+            match event {
+                Event::WindowEvent {
+                    event: WindowEvent::CloseRequested,
+                    ..
+                } => {
+                    println!("The close button was pressed; stopping");
+                    elwt.exit();
+                }
+                Event::AboutToWait => {
+                    window.request_redraw();
+                }
+                Event::WindowEvent {
+                    event: WindowEvent::RedrawRequested,
+                    ..
+                } => {
+                    world.draw(pixels.frame_mut());
+                    pixels.render().unwrap();
+                }
+                _ => (),
             }
-            Event::AboutToWait => {
-                window.request_redraw();
-            }
-            Event::WindowEvent {
-                event: WindowEvent::RedrawRequested,
-                ..
-            } => {
-                world.draw(pixels.frame_mut());
-                pixels.render().unwrap();
-            }
-            _ => (),
-        }
-    world.update();
-    window.request_redraw();
-    }).unwrap();
+            world.update();
+            window.request_redraw();
+        })
+        .unwrap();
 }
 
-const BOX_SIZE: i16 = 8;
+const BOX_SIZE: i16 = 6;
+const FROG_PIXEL_WIDTH: i16 = 5;
 
 struct World {
     box_x: i16,
     box_y: i16,
     velocity_x: i16,
     velocity_y: i16,
+    frog: Bitmap,
 }
 
 impl World {
@@ -71,6 +76,7 @@ impl World {
             box_y: 16,
             velocity_x: 1,
             velocity_y: 1,
+            frog:  Bitmap::new("res/frog1.png"),
         }
     }
 
@@ -86,6 +92,7 @@ impl World {
         self.box_y += self.velocity_y;
     }
     fn draw(&self, frame: &mut [u8]) {
+        // box layer
         for (i, pixel) in frame.chunks_exact_mut(4).enumerate() {
             let x = (i % WIDTH as usize) as i16;
             let y = (i / WIDTH as usize) as i16;
@@ -103,5 +110,45 @@ impl World {
 
             pixel.copy_from_slice(&rgba);
         }
+        // frog layer
+        for (i, pixel) in frame.chunks_exact_mut(4).enumerate() {
+            let x = (i % WIDTH as usize) as i16 / FROG_PIXEL_WIDTH;
+            let y = (i / WIDTH as usize) as i16 / FROG_PIXEL_WIDTH;
+
+            if let Some(col) = self.frog.query_pixel(x as u32, y as u32) {
+                pixel.copy_from_slice(&col);
+            }
+
+        }
+    }
+}
+
+struct Bitmap {
+    x: u32,
+    y: u32,
+    data: Vec<[u8; 4]>,
+}
+
+impl Bitmap {
+    pub fn new(f: &str) -> Self {
+        let img = image::open(f).unwrap();
+        let (x, y) = img.dimensions();
+        let data: Vec<[u8; 4]> = img
+            .into_rgba8()
+            .into_vec()
+            .chunks_exact(4)
+            .map(|c| <[u8; 4]>::try_from(c).unwrap())
+            .collect();
+        Self { x, y, data }
+    }
+    pub fn query_pixel(&self, px: u32, py: u32) -> Option<[u8; 4]> {
+        if px >= self.x || py >= self.y {
+            return None;
+        }
+        let pixel = self.data[(px + self.x * py) as usize];
+        if pixel[3] == 0 {
+            return None;
+        }
+        Some(pixel)
     }
 }
