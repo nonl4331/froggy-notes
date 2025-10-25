@@ -42,8 +42,17 @@ fn main() {
                     event: WindowEvent::KeyboardInput { event, .. },
                     ..
                 } if event.state == ElementState::Pressed => match event.logical_key {
-                    Key::Character(c) => todo!(),
-                    Key::Named(NamedKey::Backspace) => todo!(),
+                    Key::Character(c) => {
+                        if let Ok(c) = c.parse() {
+                            note.change_cursor(TextCursorAction::AddCharacter(c));
+                        }
+                    }
+                    Key::Named(NamedKey::Backspace) => {
+                        note.change_cursor(TextCursorAction::BackspaceCharacter)
+                    }
+                    Key::Named(NamedKey::Delete) => {
+                        note.change_cursor(TextCursorAction::DeleteCharacter)
+                    }
                     Key::Named(NamedKey::Escape) => note.change_cursor(TextCursorAction::Unselect),
                     Key::Named(NamedKey::ArrowRight) => {
                         note.change_cursor(TextCursorAction::MoveRight)
@@ -121,9 +130,12 @@ impl Statement {
     ) {
         // fall back to demo text if statement is empty
         let mut render_text = &self.text[..];
-        if self.text.is_empty() {
+        self.col = [255; 4];
+        if self.text.is_empty() && text_cursor == TextCursor::None {
             render_text = DEMO_TEXT;
             self.col = [127, 127, 127, 255];
+        } else if self.text.is_empty() {
+            render_text = " ";
         }
 
         let mut chars = render_text.chars();
@@ -220,6 +232,9 @@ enum TextCursorAction {
     MoveRight,
     Select(f32, f32),
     Unselect,
+    AddCharacter(char),
+    BackspaceCharacter,
+    DeleteCharacter,
 }
 
 struct Note {
@@ -235,8 +250,7 @@ impl Note {
     fn new() -> Self {
         let font = bdf_parser::BdfFont::parse(include_bytes!("../res/Tamzen7x14r.bdf")).unwrap();
 
-        let mut statements = vec![Statement::new(), Statement::new()];
-        statements[0].text = String::from("SOME TEXT");
+        let mut statements = vec![Statement::new()];
         Self {
             frog: Frog::new(),
             start: Instant::now(),
@@ -246,7 +260,7 @@ impl Note {
         }
     }
     fn change_cursor(&mut self, action: TextCursorAction) {
-        let statement = &self.statements[self.text_cursor.0];
+        let statement = &mut self.statements[self.text_cursor.0];
         match (action, self.text_cursor.1) {
             (TextCursorAction::MoveLeft, TextCursor::InText(idx)) if idx > 0 => {
                 self.text_cursor.1 = TextCursor::InText(idx - 1);
@@ -267,7 +281,52 @@ impl Note {
                 self.text_cursor.0 = 0;
             }
             (TextCursorAction::Unselect, _) => self.text_cursor.1 = TextCursor::None,
+            (TextCursorAction::BackspaceCharacter, TextCursor::InText(idx)) if idx > 0 => {
+                statement.text.remove(idx - 1);
+                self.text_cursor.1 = TextCursor::InText(idx - 1);
+            }
+            (TextCursorAction::BackspaceCharacter, TextCursor::End) if statement.text.len() > 0 => {
+                statement.text.remove(statement.text.len() - 1);
+            }
+            (TextCursorAction::AddCharacter(c), TextCursor::InText(idx)) => {
+                statement.text.insert(idx, c);
+            }
+            (TextCursorAction::AddCharacter(c), TextCursor::End) => {
+                statement.text.push(c);
+            }
+            (TextCursorAction::DeleteCharacter, TextCursor::InText(idx))
+                if idx < statement.text.len() =>
+            {
+                statement.text.remove(idx);
+                if idx == statement.text.len() {
+                    self.text_cursor.1 = TextCursor::End;
+                }
+            }
             _ => {}
+        }
+
+        // handle delation of statements
+        if statement.text.is_empty() {
+            // change cursor state to make it more predictable
+            self.text_cursor.1 = TextCursor::End;
+
+            // remove statement if it isn't the last one
+            if self.statements.len() > 1 {
+                self.statements.remove(self.text_cursor.0);
+                // move cursor up to the next statement above
+                if self.text_cursor.0 > 0 {
+                    self.text_cursor.0 -= 1;
+                } else if !self.statements[0].text.is_empty() {
+                    // move it the start of the statement if we move statement ontop of
+                    // cursor
+                    self.text_cursor.1 = TextCursor::InText(0);
+                }
+            }
+        }
+        // make cursor more predictable
+        let statement = &self.statements[self.text_cursor.0];
+        if self.text_cursor.1 == TextCursor::InText(0) && statement.text.is_empty() {
+            self.text_cursor.1 = TextCursor::End;
         }
     }
     fn update(&mut self) {
