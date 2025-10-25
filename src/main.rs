@@ -88,8 +88,10 @@ const TEXT_PIXEL_OFFSET_RIGHT: usize = 5;
 const TEXT_PIXEL_OFFSET_BOTTOM: usize = 5;
 const TEXT_PIXEL_OFFSET_Y: usize = 40;
 
-const TEXT_PIXELS_WIDE: usize = (WIDTH as usize - TEXT_PIXEL_OFFSET_X - TEXT_PIXEL_OFFSET_RIGHT) / TEXT_PIXEL_SIZE;
-const TEXT_PIXELS_HIGH: usize = (HEIGHT as usize - TEXT_PIXEL_OFFSET_Y - TEXT_PIXEL_OFFSET_BOTTOM) / TEXT_PIXEL_SIZE;
+const TEXT_PIXELS_WIDE: usize =
+    (WIDTH as usize - TEXT_PIXEL_OFFSET_X - TEXT_PIXEL_OFFSET_RIGHT) / TEXT_PIXEL_SIZE;
+const TEXT_PIXELS_HIGH: usize =
+    (HEIGHT as usize - TEXT_PIXEL_OFFSET_Y - TEXT_PIXEL_OFFSET_BOTTOM) / TEXT_PIXEL_SIZE;
 const LINE_SPACING: i32 = 15;
 
 const DEMO_TEXT: &str = "Write something here..............AAAAAAAAAAAAAAAAAAAAAA";
@@ -109,68 +111,102 @@ impl Statement {
         &mut self,
         font_buffer: &mut [[u8; 4]],
         cursor: &mut Coord,
-        text_cursor: Option<usize>,
+        mut text_cursor: TextCursor,
         font: &BdfFont,
     ) {
+        // fall back to demo text if statement is empty
+        let mut render_text = &self.text[..];
         if self.text.is_empty() {
-            let mut render_text = &self.text[..];
-            if text_cursor.is_none() {
-                self.col = [127, 127, 127, 255];
-                render_text = DEMO_TEXT;
-            }
+            render_text = DEMO_TEXT;
+            self.col = [127, 127, 127, 255];
+        }
 
-            let mut chars = render_text.chars();
-            let mut nc = chars.next();
-            let mut statement = BoundingBox {
-                size: Coord::new(0, 0),
-                offset: *cursor,
-            };
-            let mut lc = *cursor;
-            while let Some(c) = nc {
-                let g = font.glyphs.get(c).unwrap();
-                let bb = g.bounding_box;
+        let mut chars = render_text.chars();
+        let mut nc = chars.next();
+        let mut statement = BoundingBox {
+            size: Coord::new(0, 0),
+            offset: *cursor,
+        };
+        let mut lc = *cursor;
+        let mut char_idx = 0;
+
+        // render each character
+        while let Some(c) = nc {
+            let g = font.glyphs.get(c).unwrap();
+            let bb = g.bounding_box;
+            
+            // wrap to newline if would overflow
+            if TextCursor::InText(char_idx) == text_cursor {
+                let bb = font.glyphs.get(' ').unwrap().bounding_box;
                 if lc.x + bb.offset.x + bb.size.x >= TEXT_PIXELS_WIDE as i32 {
-                    // WRAP TO NEWLINE
                     lc.x = 0;
-                    lc.y += 10;
+                    lc.y += bb.size.y;
                     continue;
                 }
-                for i in 0..(bb.size.x * bb.size.y) as usize {
-                    let x = i % bb.size.x as usize;
-                    let y = i / bb.size.x as usize;
-                    if g.pixel(x, y) {
-                        let x = x as i32 + lc.x + bb.offset.x;
-                        let y = y as i32 + lc.y + bb.offset.y;
-                        if x >= 0
-                            && y >= 0
-                            && (x as usize) < TEXT_PIXELS_WIDE
-                            && (y as usize) < TEXT_PIXELS_HIGH
-                        {
-                            font_buffer[x as usize + y as usize * TEXT_PIXELS_WIDE] = self.col;
-                        }
+            }
+            if lc.x + bb.offset.x + bb.size.x >= TEXT_PIXELS_WIDE as i32 {
+                lc.x = 0;
+                lc.y += bb.size.y;
+                continue;
+            }
+
+            // write pixels to framebuffer if they fit
+            for i in 0..(bb.size.x * bb.size.y) as usize {
+                let x = i % bb.size.x as usize;
+                let y = i / bb.size.x as usize;
+                if g.pixel(x, y) {
+                    let x = x as i32 + lc.x + bb.offset.x;
+                    let y = y as i32 + lc.y + bb.offset.y;
+                    if x >= 0
+                        && y >= 0
+                        && (x as usize) < TEXT_PIXELS_WIDE
+                        && (y as usize) < TEXT_PIXELS_HIGH
+                    {
+                        font_buffer[x as usize + y as usize * TEXT_PIXELS_WIDE] = self.col;
                     }
                 }
-
-                lc.x += g.device_width.x;
-
-                statement.size.x = statement.size.x.max(lc.x - cursor.x);
-                statement.size.y = statement.size.y.max(lc.y - cursor.y);
-
-                if let Some(new_c) = chars.next() {
-                    nc = Some(new_c);
-                } else {
-                    // if last char move cursor down a line
-                    lc.x = 0;
-                    lc.y += 10;
-                    nc = None;
-                }
             }
-            cursor.y = lc.y + LINE_SPACING;
+
+            // place text cursor inline with character
+            if TextCursor::InText(char_idx) == text_cursor {
+                nc = Some('_');
+                char_idx += 1;
+                continue;
+            }
+            char_idx += 1;
+
+            // expand bounding box of statement and move cursor
+            lc.x += g.device_width.x;
+            statement.size.x = statement.size.x.max(lc.x - cursor.x);
+            statement.size.y = statement.size.y.max(lc.y - cursor.y);
+
+            if let Some(new_c) = chars.next() {
+                nc = Some(new_c);
+            } else {
+                // potentially add cursor to end of line
+                if text_cursor == TextCursor::End {
+                    nc = Some('_');
+                    text_cursor = TextCursor::None;
+                    continue;
+                }
+                // if move cursor down a line so next statement is on newline
+                lc.x = 0;
+                lc.y += bb.size.y;
+                nc = None;
+            }
         }
+        cursor.y = lc.y + LINE_SPACING;
     }
     pub fn is_empty(&self) -> bool {
         self.text.is_empty()
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TextCursor {
+    InText(usize),
+    End,
+    None,
 }
 
 struct Note {
@@ -179,7 +215,7 @@ struct Note {
     font: BdfFont,
     statements: Vec<Statement>,
     // statement index, character index
-    text_cursor: Option<(usize, usize)>,
+    text_cursor: (usize, TextCursor),
 }
 
 impl Note {
@@ -191,7 +227,7 @@ impl Note {
             start: Instant::now(),
             font,
             statements: vec![Statement::new(), Statement::new()],
-            text_cursor: None,
+            text_cursor: (1, TextCursor::None),
         }
     }
 
@@ -217,31 +253,13 @@ impl Note {
         let mut font_buffer = vec![[0u8; 4]; TEXT_PIXELS_HIGH * TEXT_PIXELS_WIDE];
 
         // text layer
-        /*let test_text = "Hello World!";
-        for c in test_text.chars() {
-            let g = self.font.glyphs.get(c).unwrap();
-            let bb = g.bounding_box;
-            for i in 0..(bb.size.x * bb.size.y) as usize {
-                let x = i % bb.size.x as usize;
-                let y = i / bb.size.x as usize;
-                if g.pixel(x, y) {
-                    let x = x as i32 + cursor.0 + bb.offset.x;
-                    let y = y as i32 + cursor.1 + bb.offset.y;
-                    if x >= 0
-                        && y >= 0
-                        && (x as usize) < TEXT_PIXELS_WIDE
-                        && (y as usize) < TEXT_PIXELS_HIGH
-                    {
-                        font_buffer[x as usize + y as usize * TEXT_PIXELS_WIDE] = [255; 4];
-                    }
-                }
-            }
-
-            cursor.0 += g.device_width.x;
-        }*/
         let mut cursor = Coord::new(0, 1);
-        for statement in &mut self.statements {
-            statement.render_into(&mut font_buffer, &mut cursor, None, &self.font);
+        for (i, statement) in self.statements.iter_mut().enumerate() {
+            let mut tc = TextCursor::None;
+            if i == self.text_cursor.0 {
+                tc = self.text_cursor.1;
+            }
+            statement.render_into(&mut font_buffer, &mut cursor, tc, &self.font);
         }
 
         let xy_to_tx_pixel = |x: usize, y: usize| {
