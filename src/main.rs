@@ -52,6 +52,7 @@ fn main() {
                     Key::Named(NamedKey::Backspace) => {
                         note.change_cursor(TextCursorAction::BackspaceCharacter)
                     }
+                    Key::Named(NamedKey::Enter) => note.change_cursor(TextCursorAction::Newline),
                     Key::Named(NamedKey::Space) => {
                         note.change_cursor(TextCursorAction::AddCharacter(' '))
                     }
@@ -136,7 +137,6 @@ const TEXT_PIXELS_WIDE: usize =
     (WIDTH as usize - TEXT_PIXEL_OFFSET_X - TEXT_PIXEL_OFFSET_RIGHT) / TEXT_PIXEL_SIZE;
 const TEXT_PIXELS_HIGH: usize =
     (HEIGHT as usize - TEXT_PIXEL_OFFSET_Y - TEXT_PIXEL_OFFSET_BOTTOM) / TEXT_PIXEL_SIZE;
-const LINE_SPACING: i32 = 15;
 
 fn font_coords_to_pixel_coords(x: i32, y: i32) -> (f32, f32) {
     (
@@ -147,9 +147,9 @@ fn font_coords_to_pixel_coords(x: i32, y: i32) -> (f32, f32) {
 
 const DEMO_TEXT: &str = "Write something here..............AAAAAAAAAAAAAAAAAAAAAA";
 impl Statement {
-    pub fn new() -> Self {
+    pub fn new(text: String) -> Self {
         Self {
-            text: String::new(),
+            text,
             bounding_box: BoundingBox {
                 size: Coord::new(0, 0),
                 offset: Coord::new(0, 0),
@@ -188,74 +188,81 @@ impl Statement {
 
         // render each character
         while let Some(c) = nc {
-            let g = font.glyphs.get(c).unwrap();
-            let bb = g.bounding_box;
+            let mut bb_y_size = 14;
+            if c == '\n' {
+                lc.x = 0;
+                lc.y += bb_y_size;
+            } else {
+                let g = font.glyphs.get(c).unwrap();
+                let bb = g.bounding_box;
+                bb_y_size = bb.size.y;
 
-            // wrap to newline if would overflow
-            if TextCursor::InText(char_idx) == text_cursor {
-                let bb = font.glyphs.get(' ').unwrap().bounding_box;
+                // wrap to newline if would overflow
+                if TextCursor::InText(char_idx) == text_cursor {
+                    let bb = font.glyphs.get(' ').unwrap().bounding_box;
+                    if lc.x + bb.offset.x + bb.size.x >= TEXT_PIXELS_WIDE as i32 {
+                        lc.x = 0;
+                        lc.y += bb.size.y;
+                        continue;
+                    }
+                }
                 if lc.x + bb.offset.x + bb.size.x >= TEXT_PIXELS_WIDE as i32 {
                     lc.x = 0;
                     lc.y += bb.size.y;
                     continue;
                 }
-            }
-            if lc.x + bb.offset.x + bb.size.x >= TEXT_PIXELS_WIDE as i32 {
-                lc.x = 0;
-                lc.y += bb.size.y;
-                continue;
-            }
 
-            // update distance to closest_char
-            let bb_lx = lc.x + bb.offset.x;
-            let bb_ly = lc.y + bb.offset.y;
-            let (lx, ly) = font_coords_to_pixel_coords(bb_lx, bb_ly);
-            let (hx, hy) = font_coords_to_pixel_coords(bb_lx + bb.size.x, bb_ly + bb.size.y);
-            let (px, py) = (0.5 * (lx + hx), 0.5 * (ly + hy));
+                // update distance to closest_char
+                let bb_lx = lc.x + bb.offset.x;
+                let bb_ly = lc.y + bb.offset.y;
+                let (lx, ly) = font_coords_to_pixel_coords(bb_lx, bb_ly);
+                let (hx, hy) = font_coords_to_pixel_coords(bb_lx + bb.size.x, bb_ly + bb.size.y);
+                let (px, py) = (0.5 * (lx + hx), 0.5 * (ly + hy));
+                // first check if it's within bb, there are cases where it can be further from centre
+                // but in bb
+                let dist_to_mouse =
+                    (mouse_tracking.pos.0 - px).powi(2) + (mouse_tracking.pos.1 - py).powi(2);
+                if (lx..hx).contains(&mouse_tracking.pos.0)
+                    && (ly..hy).contains(&mouse_tracking.pos.1)
+                {
+                    mouse_tracking.closest_char_dist = dist_to_mouse;
+                    mouse_tracking.closest_char = (usize::MAX, char_idx);
+                    mouse_tracking.over_char = true;
+                } else if dist_to_mouse < mouse_tracking.closest_char_dist {
+                    // otherwise check if it's closest
+                    mouse_tracking.closest_char_dist = dist_to_mouse;
+                    mouse_tracking.closest_char = (usize::MAX, char_idx);
+                }
 
-            // first check if it's within bb, there are cases where it can be further from centre
-            // but in bb
-            let dist_to_mouse =
-                (mouse_tracking.pos.0 - px).powi(2) + (mouse_tracking.pos.1 - py).powi(2);
-            //println!("{:?} | {:?} | {:?}", lx..hx, ly..hy, mouse_tracking.pos); 
-            if (lx..hx).contains(&mouse_tracking.pos.0) && (ly..hy).contains(&mouse_tracking.pos.1)
-            {
-                mouse_tracking.closest_char_dist = dist_to_mouse;
-                mouse_tracking.closest_char = (usize::MAX, char_idx);
-                mouse_tracking.over_char = true;
-            } else if dist_to_mouse < mouse_tracking.closest_char_dist {
-                // otherwise check if it's closest
-                mouse_tracking.closest_char_dist = dist_to_mouse;
-                mouse_tracking.closest_char = (usize::MAX, char_idx);
-            }
-
-            // write pixels to framebuffer if they fit
-            for i in 0..(bb.size.x * bb.size.y) as usize {
-                let x = i % bb.size.x as usize;
-                let y = i / bb.size.x as usize;
-                if g.pixel(x, y) {
-                    let x = x as i32 + lc.x + bb.offset.x;
-                    let y = y as i32 + lc.y + bb.offset.y;
-                    if x >= 0
-                        && y >= 0
-                        && (x as usize) < TEXT_PIXELS_WIDE
-                        && (y as usize) < TEXT_PIXELS_HIGH
-                    {
-                        font_buffer[x as usize + y as usize * TEXT_PIXELS_WIDE] = self.col;
+                // write pixels to framebuffer if they fit
+                for i in 0..(bb.size.x * bb.size.y) as usize {
+                    let x = i % bb.size.x as usize;
+                    let y = i / bb.size.x as usize;
+                    if g.pixel(x, y) {
+                        let x = x as i32 + lc.x + bb.offset.x;
+                        let y = y as i32 + lc.y + bb.offset.y;
+                        if x >= 0
+                            && y >= 0
+                            && (x as usize) < TEXT_PIXELS_WIDE
+                            && (y as usize) < TEXT_PIXELS_HIGH
+                        {
+                            font_buffer[x as usize + y as usize * TEXT_PIXELS_WIDE] = self.col;
+                        }
                     }
                 }
-            }
 
-            // place text cursor inline with character
-            if TextCursor::InText(char_idx) == text_cursor {
-                nc = Some('_');
+                // place text cursor inline with character
+                if TextCursor::InText(char_idx) == text_cursor {
+                    nc = Some('_');
+                    char_idx += 1;
+                    continue;
+                }
                 char_idx += 1;
-                continue;
+
+                lc.x += g.device_width.x;
             }
-            char_idx += 1;
 
             // expand bounding box of statement and move cursor
-            lc.x += g.device_width.x;
             statement.size.x = statement.size.x.max(lc.x - cursor.x);
             statement.size.y = statement.size.y.max(lc.y - cursor.y);
 
@@ -270,14 +277,11 @@ impl Statement {
                 }
                 // if move cursor down a line so next statement is on newline
                 lc.x = 0;
-                lc.y += bb.size.y;
+                lc.y += bb_y_size;
                 nc = None;
             }
         }
-        cursor.y = lc.y + LINE_SPACING;
-    }
-    pub fn is_empty(&self) -> bool {
-        self.text.is_empty()
+        cursor.y = lc.y;
     }
 }
 
@@ -296,6 +300,7 @@ enum TextCursorAction {
     Unselect,
     AddCharacter(char),
     BackspaceCharacter,
+    Newline,
     DeleteCharacter,
 }
 
@@ -312,7 +317,7 @@ impl Note {
     fn new() -> Self {
         let font = bdf_parser::BdfFont::parse(include_bytes!("../res/Tamzen7x14r.bdf")).unwrap();
 
-        let statements = vec![Statement::new()];
+        let statements = vec![Statement::new(String::from(""))];
         Self {
             frog: Frog::new(),
             start: Instant::now(),
@@ -325,6 +330,7 @@ impl Note {
         todo!();
     }
     fn change_cursor(&mut self, action: TextCursorAction) {
+        let mut trigger_delete = false;
         let statement = &mut self.statements[self.text_cursor.0];
         match (action, self.text_cursor.1) {
             (TextCursorAction::MoveLeft, TextCursor::InText(idx)) if idx > 0 => {
@@ -349,12 +355,44 @@ impl Note {
                 }
             }
             (TextCursorAction::Unselect, _) => self.text_cursor.1 = TextCursor::None,
+            (TextCursorAction::BackspaceCharacter, _) if statement.text.is_empty() => {
+                trigger_delete = true;
+            }
             (TextCursorAction::BackspaceCharacter, TextCursor::InText(idx)) if idx > 0 => {
                 statement.text.remove(idx - 1);
                 self.text_cursor.1 = TextCursor::InText(idx - 1);
+                trigger_delete = true;
             }
             (TextCursorAction::BackspaceCharacter, TextCursor::End) if statement.text.len() > 0 => {
                 statement.text.remove(statement.text.len() - 1);
+                trigger_delete = true;
+            }
+            // don't create new statement if it only consistents of whitespace characters
+            (TextCursorAction::Newline, TextCursor::InText(idx))
+                if statement.text.replace("\n", "").is_empty() =>
+            {
+                if (0..statement.text.len()).contains(&idx) {
+                    statement.text.insert(idx, '\n');
+                }
+            }
+            (TextCursorAction::Newline, TextCursor::End)
+                if statement.text.replace("\n", "").is_empty() =>
+            {
+                statement.text.push('\n');
+            }
+            (TextCursorAction::Newline, TextCursor::InText(idx)) => {
+                let mut split_off = statement.text.split_off(idx);
+                std::mem::swap(&mut statement.text, &mut split_off);
+                self.statements
+                    .insert(self.text_cursor.0, Statement::new(split_off));
+                self.text_cursor.0 += 1;
+                self.text_cursor.1 = TextCursor::End;
+            }
+            (TextCursorAction::Newline, TextCursor::End) => {
+                self.statements
+                    .insert(self.text_cursor.0 + 1, Statement::new(String::from("")));
+                self.text_cursor.0 += 1;
+                self.text_cursor.1 = TextCursor::End;
             }
             (TextCursorAction::AddCharacter(c), TextCursor::InText(idx)) => {
                 statement.text.insert(idx, c);
@@ -373,13 +411,16 @@ impl Note {
             _ => {}
         }
 
+        let statement = &mut self.statements[self.text_cursor.0];
         // handle delation of statements
         if statement.text.is_empty() {
             // change cursor state to make it more predictable
             self.text_cursor.1 = TextCursor::End;
 
             // remove statement if it isn't the last one
-            if self.statements.len() > 1 {
+            if self.statements.len() != self.text_cursor.0 + 1
+                || (trigger_delete && self.statements.len() > 1)
+            {
                 self.statements.remove(self.text_cursor.0);
                 // move cursor up to the next statement above
                 if self.text_cursor.0 > 0 {
@@ -392,9 +433,10 @@ impl Note {
             }
         }
         // make cursor more predictable
-        let statement = &self.statements[self.text_cursor.0];
-        if self.text_cursor.1 == TextCursor::InText(0) && statement.text.is_empty() {
-            self.text_cursor.1 = TextCursor::End;
+        if let TextCursor::InText(idx) = self.text_cursor.1 {
+            if idx >= self.statements[self.text_cursor.0].text.len() {
+                self.text_cursor.1 = TextCursor::End;
+            }
         }
     }
     fn update(&mut self) {
