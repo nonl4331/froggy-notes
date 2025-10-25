@@ -198,14 +198,14 @@ impl Frog {
             u = 1.0 - u;
         }
 
+        if !((0.0..1.0).contains(&u) && (0.0..1.0).contains(&v)) {
+            return None;
+        }
+
         // get pixel
         let u = (u * frame.x as f32) as usize;
         let v = (v * frame.y as f32) as usize;
 
-
-        if u >= frame.x || v >= frame.y {
-            return None;
-        }
         let pixel = frame.data[u + frame.x * v];
         if pixel[3] == 0 {
             return None;
