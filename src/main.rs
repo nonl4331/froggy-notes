@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use image::GenericImageView;
 use winit::{
     event::{Event, WindowEvent},
@@ -24,7 +26,7 @@ fn main() {
         .build(&event_loop)
         .unwrap();
 
-    let mut world = World::new();
+    let mut note = Note::new();
 
     let mut pixels = {
         let window_size = window.inner_size();
@@ -49,75 +51,52 @@ fn main() {
                     event: WindowEvent::RedrawRequested,
                     ..
                 } => {
-                    world.draw(pixels.frame_mut());
+                    note.draw(pixels.frame_mut());
                     pixels.render().unwrap();
                 }
                 _ => (),
             }
-            world.update();
+            note.update();
             window.request_redraw();
         })
         .unwrap();
 }
 
-const BOX_SIZE: i16 = 6;
 const FROG_PIXEL_WIDTH: i16 = 5;
 
-struct World {
-    box_x: i16,
-    box_y: i16,
-    velocity_x: i16,
-    velocity_y: i16,
-    frog: Bitmap,
+struct Note {
+    start: Instant,
+    frog: Frog,
     font: BdfFont,
 }
 
-impl World {
+impl Note {
     fn new() -> Self {
         let font = bdf_parser::BdfFont::parse(include_bytes!("../res/Tamzen7x14r.bdf")).unwrap();
 
         Self {
-            box_x: 24,
-            box_y: 16,
-            velocity_x: 1,
-            velocity_y: 1,
-            frog: Bitmap::new("res/frog1.png"),
+            frog: Frog::new(),
+            start: Instant::now(),
             font,
         }
     }
 
     fn update(&mut self) {
-        if self.box_x <= 0 || self.box_x + BOX_SIZE > WIDTH as i16 {
-            self.velocity_x *= -1;
-        }
-        if self.box_y <= 0 || self.box_y + BOX_SIZE > HEIGHT as i16 {
-            self.velocity_y *= -1;
-        }
-
-        self.box_x += self.velocity_x;
-        self.box_y += self.velocity_y;
+        let t = self.start.elapsed().as_secs_f32();
+        self.frog.position = [0.5 + 0.4 * t.sin(), 0.5 + 0.4 * t.cos()];
     }
     fn draw(&self, frame: &mut [u8]) {
         // background
         for pixel in frame.chunks_exact_mut(4) {
-
             pixel.copy_from_slice(&[50, 205, 50, 255]);
         }
 
-        for (i, pixel) in frame.chunks_exact_mut(4).enumerate() {
-            let x = (i % WIDTH as usize) as i16 / FROG_PIXEL_WIDTH;
-            let y = (i / WIDTH as usize) as i16 / FROG_PIXEL_WIDTH;
-
-            if let Some(col) = self.frog.query_pixel(x as u32, y as u32) {
-                pixel.copy_from_slice(&col);
-            }
-        }
         // frog layer
         for (i, pixel) in frame.chunks_exact_mut(4).enumerate() {
-            let x = (i % WIDTH as usize) as i16 / FROG_PIXEL_WIDTH;
-            let y = (i / WIDTH as usize) as i16 / FROG_PIXEL_WIDTH;
+            let x = (i % WIDTH as usize) as f32 / WIDTH as f32;
+            let y = (i / WIDTH as usize) as f32 / HEIGHT as f32;
 
-            if let Some(col) = self.frog.query_pixel(x as u32, y as u32) {
+            if let Some(col) = self.frog.query_uv(x, y) {
                 pixel.copy_from_slice(&col);
             }
         }
@@ -178,15 +157,72 @@ impl World {
     }
 }
 
+struct Frog {
+    frames: Vec<Bitmap>,
+    // UV coordinates
+    pub position: [f32; 2],
+    frame_num: usize,
+    facing_right: bool,
+}
+
+impl Frog {
+    pub fn new() -> Self {
+        let frames = vec![Bitmap::new_from_bytes(include_bytes!("../res/frog1.png"))];
+        Self {
+            frames,
+            position: [0.0, 0.0],
+            frame_num: 0,
+            facing_right: false,
+        }
+    }
+    pub fn query_uv(&self, u: f32, v: f32) -> Option<[u8; 4]> {
+
+        // move to position
+        let mut u = u - self.position[0];
+        let mut v = v - self.position[1];
+        let frame = &self.frames[self.frame_num];
+
+        let u_size = FROG_PIXEL_WIDTH as f32 * frame.x as f32 / WIDTH as f32;
+        let v_size = FROG_PIXEL_WIDTH as f32 * frame.y as f32 / HEIGHT as f32;
+
+        // position relative to centre of frog
+        u += 0.5 * u_size;
+        v += 0.5 * v_size;
+
+        // scale correctly
+        u /= u_size;
+        v /= v_size;
+
+        // flip
+        if self.facing_right {
+            u = 1.0 - u;
+        }
+
+        // get pixel
+        let u = (u * frame.x as f32) as usize;
+        let v = (v * frame.y as f32) as usize;
+
+
+        if u >= frame.x || v >= frame.y {
+            return None;
+        }
+        let pixel = frame.data[u + frame.x * v];
+        if pixel[3] == 0 {
+            return None;
+        }
+        Some(pixel)
+    }
+}
+
 struct Bitmap {
-    x: u32,
-    y: u32,
-    data: Vec<[u8; 4]>,
+    pub x: usize,
+    pub y: usize,
+    pub data: Vec<[u8; 4]>,
 }
 
 impl Bitmap {
-    pub fn new(f: &str) -> Self {
-        let img = image::open(f).unwrap();
+    pub fn new_from_bytes(v: &[u8]) -> Self {
+        let img = image::load_from_memory(v).unwrap();
         let (x, y) = img.dimensions();
         let data: Vec<[u8; 4]> = img
             .into_rgba8()
@@ -194,16 +230,6 @@ impl Bitmap {
             .chunks_exact(4)
             .map(|c| <[u8; 4]>::try_from(c).unwrap())
             .collect();
-        Self { x, y, data }
-    }
-    pub fn query_pixel(&self, px: u32, py: u32) -> Option<[u8; 4]> {
-        if px >= self.x || py >= self.y {
-            return None;
-        }
-        let pixel = self.data[(px + self.x * py) as usize];
-        if pixel[3] == 0 {
-            return None;
-        }
-        Some(pixel)
+        Self { x: x as usize, y: y as usize, data }
     }
 }
