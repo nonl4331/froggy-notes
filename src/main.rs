@@ -1,3 +1,4 @@
+use glyph_brush_layout::{FontId, GlyphPositioner, Layout, SectionGeometry, SectionText};
 use image::GenericImageView;
 use winit::{
     event::{Event, WindowEvent},
@@ -69,16 +70,12 @@ struct World {
     velocity_x: i16,
     velocity_y: i16,
     frog: Bitmap,
-    font: PxScaleFont<FontArc>,
+    font: FontArc,
 }
 
 impl World {
     fn new() -> Self {
-        let font = ab_glyph::FontArc::try_from_slice(include_bytes!("../res/font1.otf")).unwrap();
-        let font = PxScaleFont {
-            font,
-            scale: PxScale { x: 16.0, y: 16.0 },
-        };
+        let font = ab_glyph::FontArc::try_from_slice(include_bytes!("../res/font3.ttf")).unwrap();
 
         Self {
             box_x: 24,
@@ -137,35 +134,44 @@ impl World {
                 pixel.copy_from_slice(&col);
             }
         }
-        const TEXT_PIXELS_WIDE: usize = 100;
+        const TEXT_PIXELS_WIDE: usize = 400;
         const TEXT_PIXELS_HIGH: usize = 100;
         let mut font_buffer = vec![[0u8; 4]; TEXT_PIXELS_HIGH * TEXT_PIXELS_WIDE];
 
-        use ab_glyph::ScaleFont;
         // text layer
-        let test_text = "H";
-        let mut caret = point(0.0, 16.0);
-        let mut prev = None;
-        for c in test_text.chars() {
-            let id = self.font.glyph_id(c);
-            if let Some(prev_id) = prev {
-                caret.x += self.font.kern(prev_id, id);
-            }
-            let mut glyph = id.with_scale_and_position(16.0, caret);
-            glyph.position.x = glyph.position.x.round();
-            glyph.position.y = glyph.position.y.round();
-            if let Some(bm) = self.font.outline_glyph(glyph) {
-                bm.draw(|x, y, v| {
-                    if v > 0.5 {
-                        font_buffer[x as usize + y as usize * TEXT_PIXELS_WIDE] = [255, 255, 255, 255];
+        let test_text = "abfdnajkl;1$@!$789 124";
+        let glyphs = Layout::default().calculate_glyphs(&[&self.font], &SectionGeometry {
+            screen_position: (0.0, 0.0),
+            ..SectionGeometry::default()
+            },
+            &[
+                SectionText {
+                    text: test_text,
+                    scale: self.font.pt_to_px_scale(24.0).unwrap(),
+                    font_id: FontId(0),
+                },
+            ]
+
+        );
+
+        for glyph in glyphs {
+            if let Some(outline) = self.font.outline_glyph(glyph.glyph) {
+                let bb = outline.px_bounds();
+                let posx = bb.min.x as u32;
+                let posy = bb.min.y as u32;
+                outline.draw(|x, y, v| {
+                    if v > 0.0 {
+                        let x = posx + x;
+                        let y = posy + y;
+                        if (x as usize) < TEXT_PIXELS_WIDE && (y as usize) < TEXT_PIXELS_HIGH {
+                            font_buffer[x as usize + y as usize * TEXT_PIXELS_WIDE] = [(255.0) as u8; 4];
+                        }
                     }
-                })
+                });
             }
-            prev = Some(id);
-            caret.x += self.font.h_advance(id);
         }
 
-        const TEXT_PIXEL_SIZE: usize = 16;
+        const TEXT_PIXEL_SIZE: usize = 1;
         const TEXT_PIXEL_OFFSET_X: usize = 40;
         const TEXT_PIXEL_OFFSET_Y: usize = 40;
         let xy_to_tx_pixel = |x: usize, y: usize| {
