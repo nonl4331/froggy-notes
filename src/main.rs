@@ -44,8 +44,13 @@ fn main() {
                 } if event.state == ElementState::Pressed => match event.logical_key {
                     Key::Character(c) => todo!(),
                     Key::Named(NamedKey::Backspace) => todo!(),
-                    Key::Named(NamedKey::ArrowRight) => todo!(),
-                    Key::Named(NamedKey::ArrowLeft) => todo!(),
+                    Key::Named(NamedKey::Escape) => note.change_cursor(TextCursorAction::Unselect),
+                    Key::Named(NamedKey::ArrowRight) => {
+                        note.change_cursor(TextCursorAction::MoveRight)
+                    }
+                    Key::Named(NamedKey::ArrowLeft) => {
+                        note.change_cursor(TextCursorAction::MoveLeft)
+                    }
                     _ => {}
                 },
                 Event::WindowEvent {
@@ -134,7 +139,7 @@ impl Statement {
         while let Some(c) = nc {
             let g = font.glyphs.get(c).unwrap();
             let bb = g.bounding_box;
-            
+
             // wrap to newline if would overflow
             if TextCursor::InText(char_idx) == text_cursor {
                 let bb = font.glyphs.get(' ').unwrap().bounding_box;
@@ -209,6 +214,14 @@ enum TextCursor {
     None,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum TextCursorAction {
+    MoveLeft,
+    MoveRight,
+    Select(f32, f32),
+    Unselect,
+}
+
 struct Note {
     start: Instant,
     frog: Frog,
@@ -222,15 +235,41 @@ impl Note {
     fn new() -> Self {
         let font = bdf_parser::BdfFont::parse(include_bytes!("../res/Tamzen7x14r.bdf")).unwrap();
 
+        let mut statements = vec![Statement::new(), Statement::new()];
+        statements[0].text = String::from("SOME TEXT");
         Self {
             frog: Frog::new(),
             start: Instant::now(),
             font,
-            statements: vec![Statement::new(), Statement::new()],
-            text_cursor: (1, TextCursor::None),
+            statements,
+            text_cursor: (0, TextCursor::End),
         }
     }
+    fn change_cursor(&mut self, action: TextCursorAction) {
+        let statement = &self.statements[self.text_cursor.0];
+        match (action, self.text_cursor.1) {
+            (TextCursorAction::MoveLeft, TextCursor::InText(idx)) if idx > 0 => {
+                self.text_cursor.1 = TextCursor::InText(idx - 1);
+            }
+            (TextCursorAction::MoveLeft, TextCursor::End) if statement.text.len() > 0 => {
+                self.text_cursor.1 = TextCursor::InText(statement.text.len() - 1);
+            }
 
+            (TextCursorAction::MoveRight, TextCursor::InText(idx))
+                if idx + 1 < statement.text.len() =>
+            {
+                self.text_cursor.1 = TextCursor::InText(idx + 1);
+            }
+            (TextCursorAction::MoveRight, TextCursor::InText(_)) => {
+                self.text_cursor.1 = TextCursor::End;
+            }
+            (TextCursorAction::Select(_, _), _) => {
+                self.text_cursor.0 = 0;
+            }
+            (TextCursorAction::Unselect, _) => self.text_cursor.1 = TextCursor::None,
+            _ => {}
+        }
+    }
     fn update(&mut self) {
         let t = self.start.elapsed().as_secs_f32();
         self.frog.position = [0.5 + 0.4 * t.sin(), 0.5 + 0.4 * t.cos()];
