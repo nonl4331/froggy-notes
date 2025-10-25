@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use image::GenericImageView;
 use winit::{
-    event::{DeviceEvent, ElementState, Event, WindowEvent},
+    event::{ElementState, Event, MouseButton, WindowEvent},
     event_loop::EventLoop,
     keyboard::{Key, NamedKey},
     window::WindowBuilder,
@@ -35,6 +35,8 @@ fn main() {
         Pixels::new(WIDTH, HEIGHT, surface_texture).unwrap()
     };
 
+    let mut mouse_tracking = MouseCursorTracking::default();
+
     event_loop
         .run(|event, elwt| {
             match event {
@@ -50,6 +52,9 @@ fn main() {
                     Key::Named(NamedKey::Backspace) => {
                         note.change_cursor(TextCursorAction::BackspaceCharacter)
                     }
+                    Key::Named(NamedKey::Space) => {
+                        note.change_cursor(TextCursorAction::AddCharacter(' '))
+                    }
                     Key::Named(NamedKey::Delete) => {
                         note.change_cursor(TextCursorAction::DeleteCharacter)
                     }
@@ -62,6 +67,23 @@ fn main() {
                     }
                     _ => {}
                 },
+                Event::WindowEvent {
+                    event:
+                        WindowEvent::MouseInput {
+                            state: ElementState::Pressed,
+                            button: MouseButton::Left,
+                            ..
+                        },
+                    ..
+                } => {
+                    note.change_cursor(TextCursorAction::Select(mouse_tracking.clone()));
+                }
+                Event::WindowEvent {
+                    event: WindowEvent::CursorMoved { position, .. },
+                    ..
+                } => {
+                    mouse_tracking.pos = (position.x as f32, position.y as f32);
+                }
                 Event::WindowEvent {
                     event: WindowEvent::CloseRequested,
                     ..
@@ -76,7 +98,7 @@ fn main() {
                     event: WindowEvent::RedrawRequested,
                     ..
                 } => {
-                    note.draw(pixels.frame_mut());
+                    note.draw(pixels.frame_mut(), &mut mouse_tracking);
                     pixels.render().unwrap();
                 }
                 _ => (),
@@ -96,6 +118,14 @@ struct Statement {
     col: [u8; 4],
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+struct MouseCursorTracking {
+    pub pos: (f32, f32),
+    pub closest_char: (usize, usize),
+    pub closest_char_dist: f32,
+    pub over_char: bool,
+}
+
 const TEXT_PIXEL_SIZE: usize = 1;
 const TEXT_PIXEL_OFFSET_X: usize = 40;
 const TEXT_PIXEL_OFFSET_RIGHT: usize = 5;
@@ -108,8 +138,14 @@ const TEXT_PIXELS_HIGH: usize =
     (HEIGHT as usize - TEXT_PIXEL_OFFSET_Y - TEXT_PIXEL_OFFSET_BOTTOM) / TEXT_PIXEL_SIZE;
 const LINE_SPACING: i32 = 15;
 
+fn font_coords_to_pixel_coords(x: i32, y: i32) -> (f32, f32) {
+    (
+        (x * TEXT_PIXEL_SIZE as i32 + TEXT_PIXEL_OFFSET_X as i32) as f32,
+        (y * TEXT_PIXEL_SIZE as i32 + TEXT_PIXEL_OFFSET_Y as i32) as f32,
+    )
+}
+
 const DEMO_TEXT: &str = "Write something here..............AAAAAAAAAAAAAAAAAAAAAA";
-const CURSOR_TEXT: &str = "Write something here...";
 impl Statement {
     pub fn new() -> Self {
         Self {
@@ -127,6 +163,7 @@ impl Statement {
         cursor: &mut Coord,
         mut text_cursor: TextCursor,
         font: &BdfFont,
+        mouse_tracking: &mut MouseCursorTracking,
     ) {
         // fall back to demo text if statement is empty
         let mut render_text = &self.text[..];
@@ -135,7 +172,9 @@ impl Statement {
             render_text = DEMO_TEXT;
             self.col = [127, 127, 127, 255];
         } else if self.text.is_empty() {
-            render_text = " ";
+            // hack to make it render when empty
+            text_cursor = TextCursor::None;
+            render_text = "_";
         }
 
         let mut chars = render_text.chars();
@@ -165,6 +204,29 @@ impl Statement {
                 lc.x = 0;
                 lc.y += bb.size.y;
                 continue;
+            }
+
+            // update distance to closest_char
+            let bb_lx = lc.x + bb.offset.x;
+            let bb_ly = lc.y + bb.offset.y;
+            let (lx, ly) = font_coords_to_pixel_coords(bb_lx, bb_ly);
+            let (hx, hy) = font_coords_to_pixel_coords(bb_lx + bb.size.x, bb_ly + bb.size.y);
+            let (px, py) = (0.5 * (lx + hx), 0.5 * (ly + hy));
+
+            // first check if it's within bb, there are cases where it can be further from centre
+            // but in bb
+            let dist_to_mouse =
+                (mouse_tracking.pos.0 - px).powi(2) + (mouse_tracking.pos.1 - py).powi(2);
+            //println!("{:?} | {:?} | {:?}", lx..hx, ly..hy, mouse_tracking.pos); 
+            if (lx..hx).contains(&mouse_tracking.pos.0) && (ly..hy).contains(&mouse_tracking.pos.1)
+            {
+                mouse_tracking.closest_char_dist = dist_to_mouse;
+                mouse_tracking.closest_char = (usize::MAX, char_idx);
+                mouse_tracking.over_char = true;
+            } else if dist_to_mouse < mouse_tracking.closest_char_dist {
+                // otherwise check if it's closest
+                mouse_tracking.closest_char_dist = dist_to_mouse;
+                mouse_tracking.closest_char = (usize::MAX, char_idx);
             }
 
             // write pixels to framebuffer if they fit
@@ -230,7 +292,7 @@ enum TextCursor {
 enum TextCursorAction {
     MoveLeft,
     MoveRight,
-    Select(f32, f32),
+    Select(MouseCursorTracking),
     Unselect,
     AddCharacter(char),
     BackspaceCharacter,
@@ -250,7 +312,7 @@ impl Note {
     fn new() -> Self {
         let font = bdf_parser::BdfFont::parse(include_bytes!("../res/Tamzen7x14r.bdf")).unwrap();
 
-        let mut statements = vec![Statement::new()];
+        let statements = vec![Statement::new()];
         Self {
             frog: Frog::new(),
             start: Instant::now(),
@@ -258,6 +320,9 @@ impl Note {
             statements,
             text_cursor: (0, TextCursor::End),
         }
+    }
+    fn get_mouse_pos(x: f32, y: f32) -> Option<(usize, TextCursor)> {
+        todo!();
     }
     fn change_cursor(&mut self, action: TextCursorAction) {
         let statement = &mut self.statements[self.text_cursor.0];
@@ -277,8 +342,11 @@ impl Note {
             (TextCursorAction::MoveRight, TextCursor::InText(_)) => {
                 self.text_cursor.1 = TextCursor::End;
             }
-            (TextCursorAction::Select(_, _), _) => {
-                self.text_cursor.0 = 0;
+            (TextCursorAction::Select(mt), _) => {
+                if mt.over_char {
+                    self.text_cursor.0 = mt.closest_char.0;
+                    self.text_cursor.1 = TextCursor::InText(mt.closest_char.1);
+                }
             }
             (TextCursorAction::Unselect, _) => self.text_cursor.1 = TextCursor::None,
             (TextCursorAction::BackspaceCharacter, TextCursor::InText(idx)) if idx > 0 => {
@@ -333,7 +401,7 @@ impl Note {
         let t = self.start.elapsed().as_secs_f32();
         self.frog.position = [0.5 + 0.4 * t.sin(), 0.5 + 0.4 * t.cos()];
     }
-    fn draw(&mut self, frame: &mut [u8]) {
+    fn draw(&mut self, frame: &mut [u8], mouse_tracking: &mut MouseCursorTracking) {
         // background
         for pixel in frame.chunks_exact_mut(4) {
             pixel.copy_from_slice(&[50, 205, 50, 255]);
@@ -352,12 +420,23 @@ impl Note {
 
         // text layer
         let mut cursor = Coord::new(0, 1);
+        mouse_tracking.over_char = false;
         for (i, statement) in self.statements.iter_mut().enumerate() {
             let mut tc = TextCursor::None;
             if i == self.text_cursor.0 {
                 tc = self.text_cursor.1;
             }
-            statement.render_into(&mut font_buffer, &mut cursor, tc, &self.font);
+            statement.render_into(
+                &mut font_buffer,
+                &mut cursor,
+                tc,
+                &self.font,
+                mouse_tracking,
+            );
+            // sentenial value to indicate that cloest char was in this section
+            if mouse_tracking.closest_char.0 == usize::MAX {
+                mouse_tracking.closest_char.0 = i;
+            }
         }
 
         let xy_to_tx_pixel = |x: usize, y: usize| {
