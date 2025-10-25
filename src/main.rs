@@ -115,7 +115,6 @@ const FROG_PIXEL_WIDTH: i16 = 5;
 #[derive(Debug)]
 struct Statement {
     text: String,
-    bounding_box: BoundingBox,
     col: [u8; 4],
 }
 
@@ -145,15 +144,10 @@ fn font_coords_to_pixel_coords(x: i32, y: i32) -> (f32, f32) {
     )
 }
 
-const DEMO_TEXT: &str = "Write something here..............AAAAAAAAAAAAAAAAAAAAAA";
 impl Statement {
     pub fn new(text: String) -> Self {
         Self {
             text,
-            bounding_box: BoundingBox {
-                size: Coord::new(0, 0),
-                offset: Coord::new(0, 0),
-            },
             col: [255; 4],
         }
     }
@@ -168,10 +162,7 @@ impl Statement {
         // fall back to demo text if statement is empty
         let mut render_text = &self.text[..];
         self.col = [255; 4];
-        if self.text.is_empty() && text_cursor == TextCursor::None {
-            render_text = DEMO_TEXT;
-            self.col = [127, 127, 127, 255];
-        } else if self.text.is_empty() {
+        if self.text.is_empty() && text_cursor != TextCursor::None {
             // hack to make it render when empty
             text_cursor = TextCursor::None;
             render_text = "_";
@@ -186,12 +177,21 @@ impl Statement {
         let mut lc = *cursor;
         let mut char_idx = 0;
 
+        let mut was_newline = false;
+
         // render each character
         while let Some(c) = nc {
             let mut bb_y_size = 14;
             if c == '\n' {
                 lc.x = 0;
+                if TextCursor::InText(char_idx) == text_cursor {
+                    nc = Some('_');
+                    char_idx += 1;
+                    was_newline = true;
+                    continue;
+                }
                 lc.y += bb_y_size;
+                char_idx += 1;
             } else {
                 let g = font.glyphs.get(c).unwrap();
                 let bb = g.bounding_box;
@@ -260,6 +260,12 @@ impl Statement {
                 char_idx += 1;
 
                 lc.x += g.device_width.x;
+
+                if was_newline {
+                    lc.y += bb_y_size;
+                    lc.x = 0;
+                    was_newline = false;
+                }
             }
 
             // expand bounding box of statement and move cursor
@@ -281,7 +287,11 @@ impl Statement {
                 nc = None;
             }
         }
+        if lc.y == cursor.y {
+            lc.y += 14;
+        }
         cursor.y = lc.y;
+        cursor.x = 0;
     }
 }
 
@@ -326,11 +336,9 @@ impl Note {
             text_cursor: (0, TextCursor::End),
         }
     }
-    fn get_mouse_pos(x: f32, y: f32) -> Option<(usize, TextCursor)> {
-        todo!();
-    }
     fn change_cursor(&mut self, action: TextCursorAction) {
         let mut trigger_delete = false;
+        let len_statements = self.statements.len();
         let statement = &mut self.statements[self.text_cursor.0];
         match (action, self.text_cursor.1) {
             (TextCursorAction::MoveLeft, TextCursor::InText(idx)) if idx > 0 => {
@@ -339,7 +347,28 @@ impl Note {
             (TextCursorAction::MoveLeft, TextCursor::End) if statement.text.len() > 0 => {
                 self.text_cursor.1 = TextCursor::InText(statement.text.len() - 1);
             }
-
+            (TextCursorAction::MoveLeft, TextCursor::End | TextCursor::InText(_))
+                if statement.text.is_empty() && self.text_cursor.0 > 0 =>
+            {
+                self.text_cursor.0 -= 1;
+                self.text_cursor.1 = TextCursor::End;
+            }
+            (TextCursorAction::MoveLeft, TextCursor::InText(0)) if self.text_cursor.0 > 0 => {
+                self.text_cursor.0 -= 1;
+                self.text_cursor.1 = TextCursor::End;
+            }
+            (TextCursorAction::MoveRight, TextCursor::End)
+                if self.text_cursor.0 + 1 < len_statements =>
+            {
+                self.text_cursor.0 += 1;
+                self.text_cursor.1 = TextCursor::InText(0);
+            }
+            (TextCursorAction::MoveRight, TextCursor::InText(idx))
+                if idx + 1 > statement.text.len() && self.text_cursor.0 + 1 < len_statements =>
+            {
+                self.text_cursor.0 += 1;
+                self.text_cursor.1 = TextCursor::InText(0);
+            }
             (TextCursorAction::MoveRight, TextCursor::InText(idx))
                 if idx + 1 < statement.text.len() =>
             {
@@ -361,11 +390,23 @@ impl Note {
             (TextCursorAction::BackspaceCharacter, TextCursor::InText(idx)) if idx > 0 => {
                 statement.text.remove(idx - 1);
                 self.text_cursor.1 = TextCursor::InText(idx - 1);
-                trigger_delete = true;
+            }
+            (TextCursorAction::BackspaceCharacter, TextCursor::InText(idx)) if idx == 0 => {
+                // join statements together
+                if self.text_cursor.0 > 0 {
+                    let old_len = self.statements[self.text_cursor.0 - 1].text.len();
+                    let str = std::mem::replace(
+                        &mut self.statements[self.text_cursor.0].text,
+                        String::new(),
+                    );
+                    self.statements[self.text_cursor.0 - 1].text.push_str(&str);
+                    self.statements.remove(self.text_cursor.0);
+                    self.text_cursor.0 -= 1;
+                    self.text_cursor.1 = TextCursor::InText(old_len);
+                }
             }
             (TextCursorAction::BackspaceCharacter, TextCursor::End) if statement.text.len() > 0 => {
                 statement.text.remove(statement.text.len() - 1);
-                trigger_delete = true;
             }
             // don't create new statement if it only consistents of whitespace characters
             (TextCursorAction::Newline, TextCursor::InText(idx))
@@ -386,7 +427,7 @@ impl Note {
                 self.statements
                     .insert(self.text_cursor.0, Statement::new(split_off));
                 self.text_cursor.0 += 1;
-                self.text_cursor.1 = TextCursor::End;
+                self.text_cursor.1 = TextCursor::InText(0);
             }
             (TextCursorAction::Newline, TextCursor::End) => {
                 self.statements
@@ -395,7 +436,15 @@ impl Note {
                 self.text_cursor.1 = TextCursor::End;
             }
             (TextCursorAction::AddCharacter(c), TextCursor::InText(idx)) => {
-                statement.text.insert(idx, c);
+                if statement.text.replace('\n', "").is_empty() {
+                    self.statements
+                        .insert(self.text_cursor.0 + 1, Statement::new(String::from(c)));
+                    self.text_cursor.0 += 1;
+                    self.text_cursor.1 = TextCursor::End;
+                } else {
+                    statement.text.insert(idx, c);
+                    self.text_cursor.1 = TextCursor::InText(idx + 1);
+                }
             }
             (TextCursorAction::AddCharacter(c), TextCursor::End) => {
                 statement.text.push(c);
@@ -408,19 +457,26 @@ impl Note {
                     self.text_cursor.1 = TextCursor::End;
                 }
             }
+            (TextCursorAction::DeleteCharacter, TextCursor::End) if self.text_cursor.0 + 1 < len_statements =>
+            {
+                // join statements together
+                    let old_len = self.statements[self.text_cursor.0].text.len();
+                    let str = std::mem::replace(
+                        &mut self.statements[self.text_cursor.0 + 1].text,
+                        String::new(),
+                    );
+                    self.statements[self.text_cursor.0].text.push_str(&str);
+                    self.statements.remove(self.text_cursor.0+1);
+                    self.text_cursor.1 = TextCursor::InText(old_len);
+            }
             _ => {}
         }
 
         let statement = &mut self.statements[self.text_cursor.0];
         // handle delation of statements
         if statement.text.is_empty() {
-            // change cursor state to make it more predictable
-            self.text_cursor.1 = TextCursor::End;
-
             // remove statement if it isn't the last one
-            if self.statements.len() != self.text_cursor.0 + 1
-                || (trigger_delete && self.statements.len() > 1)
-            {
+            if trigger_delete && self.statements.len() > 1 {
                 self.statements.remove(self.text_cursor.0);
                 // move cursor up to the next statement above
                 if self.text_cursor.0 > 0 {
@@ -461,6 +517,16 @@ impl Note {
         let mut font_buffer = vec![[0u8; 4]; TEXT_PIXELS_HIGH * TEXT_PIXELS_WIDE];
 
         // text layer
+        // remove unused statements at the end
+        while self.text_cursor.0 + 1 < self.statements.len()
+            && self.statements.len() > 1
+            && self.statements[self.statements.len() - 1]
+                .text
+                .replace('\n', "")
+                .is_empty()
+        {
+            self.statements.pop();
+        }
         let mut cursor = Coord::new(0, 1);
         mouse_tracking.over_char = false;
         for (i, statement) in self.statements.iter_mut().enumerate() {
