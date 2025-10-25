@@ -337,6 +337,8 @@ impl Note {
         }
     }
     fn change_cursor(&mut self, action: TextCursorAction) {
+        let is_ws = |str: &str| !str.chars().any(|c| c != '\n' && c != ' ');
+
         let mut trigger_delete = false;
         let len_statements = self.statements.len();
         let statement = &mut self.statements[self.text_cursor.0];
@@ -409,16 +411,12 @@ impl Note {
                 statement.text.remove(statement.text.len() - 1);
             }
             // don't create new statement if it only consistents of whitespace characters
-            (TextCursorAction::Newline, TextCursor::InText(idx))
-                if statement.text.replace("\n", "").is_empty() =>
-            {
+            (TextCursorAction::Newline, TextCursor::InText(idx)) if is_ws(&statement.text) => {
                 if (0..statement.text.len()).contains(&idx) {
                     statement.text.insert(idx, '\n');
                 }
             }
-            (TextCursorAction::Newline, TextCursor::End)
-                if statement.text.replace("\n", "").is_empty() =>
-            {
+            (TextCursorAction::Newline, TextCursor::End) if is_ws(&statement.text) => {
                 statement.text.push('\n');
             }
             (TextCursorAction::Newline, TextCursor::InText(idx)) => {
@@ -435,16 +433,37 @@ impl Note {
                 self.text_cursor.0 += 1;
                 self.text_cursor.1 = TextCursor::End;
             }
-            (TextCursorAction::AddCharacter(c), TextCursor::InText(idx)) => {
-                if statement.text.replace('\n', "").is_empty() {
+            (TextCursorAction::AddCharacter(c), TextCursor::InText(idx))
+                if is_ws(&statement.text[..idx]) && statement.text.as_bytes()[idx] == b'\n' =>
+            {
+                let split_off = statement.text.split_off(idx);
+                let new_s = format!("{c}{split_off}");
+                if self.text_cursor.0 + 1 < self.statements.len() {
+                    self.statements
+                        .insert(self.text_cursor.0 + 1, Statement::new(new_s));
+                } else {
+                    self.statements.push(Statement::new(new_s));
+                }
+                self.text_cursor.0 += 1;
+                self.text_cursor.1 = TextCursor::InText(0);
+            }
+            (TextCursorAction::AddCharacter(c), TextCursor::End)
+                if !statement.text.is_empty()
+                    && is_ws(&statement.text)
+                    && statement.text.as_bytes()[statement.text.len() - 1] == b'\n' =>
+            {
+                if self.text_cursor.0 + 1 < self.statements.len() {
                     self.statements
                         .insert(self.text_cursor.0 + 1, Statement::new(String::from(c)));
-                    self.text_cursor.0 += 1;
-                    self.text_cursor.1 = TextCursor::End;
                 } else {
-                    statement.text.insert(idx, c);
-                    self.text_cursor.1 = TextCursor::InText(idx + 1);
+                    self.statements.push(Statement::new(String::from(c)));
                 }
+                self.text_cursor.0 += 1;
+                self.text_cursor.1 = TextCursor::InText(0);
+            }
+            (TextCursorAction::AddCharacter(c), TextCursor::InText(idx)) => {
+                statement.text.insert(idx, c);
+                self.text_cursor.1 = TextCursor::InText(idx + 1);
             }
             (TextCursorAction::AddCharacter(c), TextCursor::End) => {
                 statement.text.push(c);
@@ -457,19 +476,47 @@ impl Note {
                     self.text_cursor.1 = TextCursor::End;
                 }
             }
-            (TextCursorAction::DeleteCharacter, TextCursor::End) if self.text_cursor.0 + 1 < len_statements =>
+            (TextCursorAction::DeleteCharacter, TextCursor::End)
+                if self.text_cursor.0 + 1 < len_statements =>
             {
                 // join statements together
-                    let old_len = self.statements[self.text_cursor.0].text.len();
-                    let str = std::mem::replace(
-                        &mut self.statements[self.text_cursor.0 + 1].text,
-                        String::new(),
-                    );
-                    self.statements[self.text_cursor.0].text.push_str(&str);
-                    self.statements.remove(self.text_cursor.0+1);
-                    self.text_cursor.1 = TextCursor::InText(old_len);
+                let old_len = self.statements[self.text_cursor.0].text.len();
+                let str = std::mem::replace(
+                    &mut self.statements[self.text_cursor.0 + 1].text,
+                    String::new(),
+                );
+                self.statements[self.text_cursor.0].text.push_str(&str);
+                self.statements.remove(self.text_cursor.0 + 1);
+                self.text_cursor.1 = TextCursor::InText(old_len);
             }
             _ => {}
+        }
+
+        let mut last = 0;
+        let mut current = 1;
+
+        while current < self.statements.len() {
+            if is_ws(&self.statements[last].text) && is_ws(&self.statements[current].text) {
+                let str = std::mem::replace(&mut self.statements[current].text, String::new());
+                let last_len = self.statements[last].text.len();
+                self.statements[last].text.push('\n');
+                self.statements[last].text.push_str(&str);
+                if self.text_cursor.0 == current {
+                    if let TextCursor::InText(idx) = self.text_cursor.1 {
+                        self.text_cursor.1 = TextCursor::InText(idx + last_len);
+                    }
+                } else if self.text_cursor.0 == last && self.text_cursor.1 == TextCursor::End {
+                    self.text_cursor.1 = TextCursor::InText(last_len);
+                }
+                if self.text_cursor.0 > last {
+                    self.text_cursor.0 -= 1;
+                }
+                self.statements.remove(current);
+
+                continue;
+            }
+            last = current;
+            current += 1;
         }
 
         let statement = &mut self.statements[self.text_cursor.0];
@@ -494,6 +541,7 @@ impl Note {
                 self.text_cursor.1 = TextCursor::End;
             }
         }
+        println!("{}", self.statements.len());
     }
     fn update(&mut self) {
         let t = self.start.elapsed().as_secs_f32();
